@@ -6,13 +6,16 @@ import Foundation
 
 /// A message that encodes itself into bytes, sent in one write by ``NetSocket/send(_:endian:)``
 ///
+/// The `append(_:endian:)` methods on `Data` build the bytes in the requested byte order.
+///
 /// ```swift
 /// struct Ping: NetSocketEncodable {
 ///   let id: UInt32
 ///
 ///   func encode(endian: Endian) throws -> Data {
-///     let value = endian == .big ? id.bigEndian : id.littleEndian
-///     return withUnsafeBytes(of: value) { Data($0) }
+///     var data = Data()
+///     data.append(id, endian: endian)
+///     return data
 ///   }
 /// }
 ///

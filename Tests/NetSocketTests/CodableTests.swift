@@ -18,9 +18,9 @@ private struct Greeting: NetSocketEncodable, NetSocketDecodable, Equatable {
       throw NetSocketError.encodeFailed(CocoaError(.coderInvalidValue))
     }
     var data = Data()
-    data += withUnsafeBytes(of: endian == .big ? self.id.bigEndian : self.id.littleEndian) { Data($0) }
-    data += withUnsafeBytes(of: endian == .big ? length.bigEndian : length.littleEndian) { Data($0) }
-    data += name
+    data.append(self.id, endian: endian)
+    data.append(length, endian: endian)
+    data.append(name)
     return data
   }
 

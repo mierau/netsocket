@@ -20,6 +20,7 @@ print(status) // HTTP/1.0 200 OK
 
 - **Field-by-field reads.** Read exactly *n* bytes, a big- or little-endian integer, a `Float`, `Double` or `Bool`, a fixed-length string in any `String.Encoding`, or everything up to a delimiter.
 - **Messages that encode and decode themselves.** Conform to `NetSocketEncodable` and `NetSocketDecodable` and send or receive a whole message in one call.
+- **Packet helpers.** Append integers, floats, bools and strings to `Data` or `[UInt8]` in either byte order, and read them back at an offset.
 - **File transfers.** Stream files between disk and socket in chunks, with progress, transfer speed, and time remaining. Downloads can be written atomically.
 - **Backpressure.** Receiving pauses while too much unread data is buffered, so TCP flow control slows a fast sender down instead of the buffer growing without limit.
 - **Clean shutdown.** Bytes the peer sent before closing can still be read. Pending reads fail with a clear error when the connection closes, and cancelling a read leaves the socket usable.
@@ -130,11 +131,10 @@ struct Greeting {
 extension Greeting: NetSocketEncodable {
   func encode(endian: Endian) throws -> Data {
     let name = Data(self.name.utf8)
-    let length = UInt16(name.count)
     var data = Data()
-    data += withUnsafeBytes(of: endian == .big ? id.bigEndian : id.littleEndian) { Data($0) }
-    data += withUnsafeBytes(of: endian == .big ? length.bigEndian : length.littleEndian) { Data($0) }
-    data += name
+    data.append(id, endian: endian)
+    data.append(UInt16(name.count), endian: endian)
+    data.append(name)
     return data
   }
 }
@@ -152,6 +152,27 @@ let reply = try await socket.receive(Greeting.self)
 ```
 
 Declaring `init(from:endian:)` in an extension keeps the struct's memberwise initializer. If decoding throws partway through a message, the bytes it read are gone, so the connection is usually best closed.
+
+### Packets in memory
+
+The same kinds of reads and writes work on bytes you already have: `Data`, `[UInt8]`, or slices of either. Append values to build a packet to send in one write, or read them at an offset to parse one you've received:
+
+```swift
+var packet = Data()
+packet.append(UInt16(107), endian: .big)
+packet.append(UInt32(0), endian: .big)
+packet.append(true)
+try packet.append("guest", encoding: .macOSRoman)
+
+let type = packet.read(UInt16.self, at: 0)               // 107
+let flag = packet.read(Bool.self, at: 6)                 // true
+let name = packet.read(5, at: 7, encoding: .macOSRoman)  // "guest"
+let missing = packet.read(UInt32.self, at: 10)           // nil: past the end
+```
+
+Reads return nil when there aren't enough bytes, rather than throwing. Offsets count from the start of the collection, so they work the same on slices.
+
+Unlike the socket's writes, the numeric appends have no default byte order, so you always pass `endian:`. With a default, `data.append(0)` would append an 8-byte `Int` instead of a single byte.
 
 ### File transfers
 

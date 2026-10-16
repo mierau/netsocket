@@ -23,6 +23,8 @@ let error = try await socket.read(UInt32.self)
 
 Integers can be read and written in either byte order, strings in any `String.Encoding`, and records can be split on a ``Delimiter`` such as a line ending. Larger structures can conform to ``NetSocketEncodable`` and ``NetSocketDecodable`` to encode and decode themselves.
 
+The same kinds of reads and writes work on bytes in memory. `Data`, `[UInt8]` and their slices get `append(_:endian:)` and `read(_:at:endian:)` methods, for building a packet before sending it or parsing one already received.
+
 Files go straight between disk and socket in chunks, with a progress stream that includes transfer speed and time remaining.
 
 ### Flow control

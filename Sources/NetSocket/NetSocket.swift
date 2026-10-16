@@ -161,8 +161,9 @@ public actor NetSocket {
   /// Send a fixed-width integer in the given byte order
   @discardableResult
   public func write<T: FixedWidthInteger>(_ value: T, endian: Endian = .big) async throws -> Int {
-    let ordered = endian == .big ? value.bigEndian : value.littleEndian
-    return try await self.write(withUnsafeBytes(of: ordered) { Data($0) })
+    var data = Data()
+    data.append(value, endian: endian)
+    return try await self.write(data)
   }
 
   /// Send a Bool as one byte, 1 or 0

@@ -13,6 +13,7 @@ Changes from the version in Hotline:
 - `read(until:)` takes an `encoding:` argument, which defaults to UTF-8.
 - Renamed `peek(upto:)` to `peek(upTo:)`, to match `read(upTo:)`.
 - `Delimiter.data` is public.
+- Added the generic packet helpers from Hotline's `HotlineExtensions.swift`, for `Data`, `[UInt8]` and their slices. `append(_:endian:)` appends an integer, `Float` or `Double` in either byte order, `append(_:)` appends a `Bool`, and `append(_:encoding:)` appends a string. `read(_:at:endian:)` reads the same types back at an offset, and `read(_:at:)` and `read(_:at:encoding:)` read bytes and strings. Reads return nil past the end, and offsets count from the start of a slice.
 - `NetSocketError` conforms to `LocalizedError`, so `localizedDescription` gives its description.
 - `Endian`, `Delimiter` and `TransferRateEstimator` are `Sendable`, and `Endian` and `Delimiter` are `Hashable`.
 - Fixed: with `overwrite: false`, `receiveFile(to:length:...)` replaced an existing file when `atomic` was false, and received the whole file before failing when `atomic` was true. It now throws `CocoaError.fileWriteFileExists` before reading anything from the socket.
