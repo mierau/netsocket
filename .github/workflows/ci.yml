@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: Build and test (macOS)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: swift build
+      - name: Test
+        run: swift test
+
+  platforms:
+    name: Build (${{ matrix.platform }})
+    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [iOS, tvOS, visionOS]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: xcodebuild build -scheme NetSocket -destination "generic/platform=${{ matrix.platform }}"
