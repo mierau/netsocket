@@ -30,6 +30,8 @@ public enum NetSocketError: Error, CustomStringConvertible, LocalizedError, Send
   case invalidFile(URL)
   /// The file being sent ended before the expected length
   case fileEndedEarly(expected: Int, got: Int)
+  /// A TLS identity is missing its certificate or private key
+  case invalidIdentity
 
   public var description: String {
     switch self {
@@ -45,6 +47,7 @@ public enum NetSocketError: Error, CustomStringConvertible, LocalizedError, Send
     case .stringDecodingFailed(let encoding): return "Received bytes aren't valid \(encoding)."
     case .invalidFile(let url): return "Not a readable file: \(url.path(percentEncoded: false))."
     case .fileEndedEarly(let exp, let got): return "File ended after \(got) of \(exp) bytes."
+    case .invalidIdentity: return "TLS identity is missing its certificate or private key."
     }
   }
 

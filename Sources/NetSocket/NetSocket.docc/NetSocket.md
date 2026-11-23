@@ -42,6 +42,7 @@ Cancelling the task that's waiting on a read throws `CancellationError` and leav
 ### Essentials
 
 - ``NetSocket/NetSocket``
+- ``NetSocket/NetSocket/Listener``
 - ``TLSPolicy``
 
 ### Byte Order and Framing

@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.2.0
+
+- Added `NetSocket.listen(port:)`, which takes connections on a port. The `NetSocket.Listener` it returns hands each one over as a ready `NetSocket`, in a `for await` loop.
+  - It listens over TLS with the new `TLSPolicy.server(identity:)`, and can be limited to one kind of interface, such as loopback. `server(identity:)` throws the new `NetSocketError.invalidIdentity` if the identity is missing its certificate or private key, so a bad identity fails before listening rather than in every client's handshake.
+  - It advertises with Bonjour, and `advertise(_:)` changes or withdraws the advertisement while listening.
+  - An `accepting` closure turns connections away by address before any TLS work, and connections that aren't ready within `readyTimeout` are closed.
+  - `stop()` returns once the port is free, and the port can be listened on again straight away.
+- Added `remoteEndpoint`, the host and port a socket is connected to, or for an accepted connection, where it came from.
+- Added `Config.priority`, which a socket's work runs at, from its connection's events to its TLS, and the tasks it starts for itself. It's nil by default, which leaves things as they were. A server inside an app can choose `.utility`, so the work its connections make gives way to the app's own.
+- README:
+  - A new Listening section covers `listen` and its options, including where a TLS identity comes from and when `invalidIdentity` is thrown.
+  - A new "Building a simple server" walkthrough puts it together, from taking connections to shutting the server down cleanly.
+  - It notes that a peer's half-close counts as closing.
+  - The opening example now shows the `HTTP/1.1 200 OK` that example.com actually sends.
+
 ## 0.1.0
 
 First release as a standalone package, extracted from [Hotline](https://github.com/mierau/hotline) (`Hotline/Library/NetSocket` as of [59bc09e](https://github.com/mierau/hotline/commit/59bc09e)).

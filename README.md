@@ -2,7 +2,7 @@
 
 Async/await TCP sockets for Swift, built on Network.framework.
 
-NetSocket wraps `NWConnection` in an actor with a receive buffer, so you can parse binary and line-based protocols one field at a time with plain `try await` calls. Each read waits until enough bytes have arrived, however the network split them into packets.
+NetSocket wraps `NWConnection` in an actor with a receive buffer, so you can parse binary and line-based protocols one field at a time with plain `try await` calls. Each read waits until enough bytes have arrived, however the network split them into packets. It listens for connections too, handing each one over as a socket with the same reads and writes.
 
 It was built for [Hotline](https://github.com/mierau/hotline), a client for the classic Hotline protocol, and is used there for chat, trackers, and file transfers.
 
@@ -13,7 +13,7 @@ let socket = try await NetSocket.connect(host: "example.com", port: 80)
 try await socket.write("GET / HTTP/1.0\r\nHost: example.com\r\n\r\n")
 
 let status = try await socket.read(until: .carriageReturnLineFeed)
-print(status) // HTTP/1.0 200 OK
+print(status) // HTTP/1.1 200 OK
 ```
 
 ## Features
@@ -25,6 +25,7 @@ print(status) // HTTP/1.0 200 OK
 - **Backpressure.** Receiving pauses while too much unread data is buffered, so TCP flow control slows a fast sender down instead of the buffer growing without limit.
 - **Clean shutdown.** Bytes the peer sent before closing can still be read. Pending reads fail with a clear error when the connection closes, and cancelling a read leaves the socket usable.
 - **TLS and keepalive.** Turn on TLS with one argument, and TCP keepalive with one setting.
+- **Listening.** Take connections on a port as ready sockets in a `for await` loop, over TLS too, with Bonjour advertising.
 - **Swift 6 ready.** `NetSocket` is an actor, and the package builds in the Swift 6 language mode with strict concurrency checking.
 
 ## Requirements
@@ -38,7 +39,7 @@ Add NetSocket to your `Package.swift`:
 
 ```swift
 dependencies: [
-  .package(url: "https://github.com/mierau/netsocket.git", from: "0.1.0"),
+  .package(url: "https://github.com/mierau/netsocket.git", from: "0.2.0"),
 ],
 targets: [
   .target(name: "MyApp", dependencies: [
@@ -220,6 +221,8 @@ do {
 }
 ```
 
+A peer that only stops sending, which TCP calls a half-close, counts as closing too, so nothing more can be written to it.
+
 Cancelling a task that's waiting on a read throws `CancellationError`, and the socket stays usable.
 
 ### Buffering
@@ -227,6 +230,109 @@ Cancelling a task that's waiting on a read throws `CancellationError`, and the s
 The socket buffers data as it arrives, up to `Config.receiveHighWaterMark` unread bytes (1 MB by default). Above that it stops receiving until reads drain the buffer, which lets TCP flow control slow the sender. A single read larger than the high-water mark still works; receiving resumes as soon as a read needs more than is buffered.
 
 As a final safeguard, the connection is closed with `NetSocketError.framingExceeded` if more than `Config.maxBufferBytes` (8 MB by default) would be buffered. That only happens for a single read larger than the limit, or a delimiter that never arrives. Use `maxBytes` on delimited reads to catch the second case sooner, without closing the connection.
+
+### Listening
+
+`listen` opens a port and hands over each connection as a `NetSocket` once it's ready, with the same reads and writes as one you connected yourself:
+
+```swift
+let listener = try await NetSocket.listen(port: 5500)
+for await socket in listener {
+  Task {
+    do {
+      let name = try await socket.read(until: .lineFeed)
+      try await socket.write("Hello, \(name)\n")
+    } catch {
+      // The client left before saying anything
+    }
+    await socket.close()
+  }
+}
+```
+
+`socket.remoteEndpoint` says where a connection came from. `listen` takes options for TLS, Bonjour, and which connections to take:
+
+```swift
+// TLS, answering with a certificate and its private key
+let secure = try await NetSocket.listen(port: 5600, tls: .server(identity: identity))
+
+// Only this Mac, any free port, and advertised with Bonjour
+let local = try await NetSocket.listen(
+  interface: .loopback,
+  service: NWListener.Service(name: "My Server", type: "_myservice._tcp", domain: nil, txtRecord: NWTXTRecord(["version": "1"]))
+)
+print(local.port)
+
+// Turn connections away by address, before any TLS work
+let picky = try await NetSocket.listen(port: 5500) { endpoint in
+  !blocked.contains(endpoint)
+}
+
+// A server inside an app, whose connections' work gives way to the app's own
+var background = NetSocket.Config()
+background.priority = .utility
+let quiet = try await NetSocket.listen(port: 5500, config: background)
+```
+
+For TLS, `identity` is a `SecIdentity`: the certificate and private key the server answers with, such as one imported from a `.p12` file with `SecPKCS12Import`, or found in the keychain. `.server(identity:)` checks it straight away, and throws `NetSocketError.invalidIdentity` if it's missing either one, so a bad identity fails before listening rather than in every client's handshake.
+
+A connection that isn't ready within `readyTimeout` (10 seconds by default), as when a client never finishes its TLS handshake, is closed without being handed over.
+
+Once it's listening, `advertise(_:)` changes the Bonjour name or TXT record, or stops advertising with nil. `await listener.stop()` stops listening and ends the loop, and returns once the port is free to listen on again. Sockets already handed over stay open.
+
+`listen` throws `NetSocketError.failed` if the port can't be listened on, as when another listener has it.
+
+## Building a simple server
+
+A server is a listener and a task for each connection it hands over. This one answers each line a client sends, until the client leaves:
+
+```swift
+import NetSocket
+
+/// Answers each line a client sends, until it leaves
+func serve(_ socket: NetSocket) async {
+  do {
+    while true {
+      let line = try await socket.read(until: .lineFeed, maxBytes: 1024)
+      try await socket.write("You said: \(line)\n")
+    }
+  } catch {
+    // They left, sent a line over 1 KB, or the server's shutting down.
+  }
+  await socket.close()
+}
+
+let listener = try await NetSocket.listen(port: 5500)
+
+// The connections' tasks are in one group, so they can be ended together.
+let server = Task {
+  await withDiscardingTaskGroup { group in
+    for await socket in listener {
+      group.addTask {
+        await serve(socket)
+      }
+    }
+  }
+}
+```
+
+In a command-line tool, finish with `await server.value` to keep it running. Try it by typing into `nc localhost 5500`. Piping into `nc` gets no reply, as it stops sending when its input runs out, which closes the connection.
+
+To shut it down, stop the listener, then cancel the server's task. That cancels every connection's task too, so their reads throw `CancellationError`, and each `serve` returns and closes its socket:
+
+```swift
+await listener.stop()  // Takes no more connections, and frees the port
+server.cancel()        // Ends every client's connection
+await server.value     // Returns once they're all closed
+```
+
+To let clients finish instead, only stop the listener. `server.value` returns once the last one leaves.
+
+- **Each connection gets a task of its own**, so a slow client never holds up the others. A discarding group (macOS 14, iOS 17 and later) lets go of each one as it finishes, which a server that runs for weeks needs.
+- **`maxBytes`** keeps a client from sending one endless line.
+- **For TLS**, listen with `tls: .server(identity:)`. Sockets arrive once their handshake is done, so `serve` stays the same.
+
+Before it faces the internet, give clients a deadline, as a read waits as long as it takes, and turn away addresses you don't want with `listen`'s `accepting:` closure.
 
 ## Documentation
 

@@ -35,12 +35,35 @@ public actor NetSocket {
     public var enableKeepAlive: Bool = false
     /// Seconds of idle time before the first keepalive probe (default: 60)
     public var keepAliveIdleTime: Int = 60
+    /// The priority the socket's work runs at, from its connection's events and TLS to the tasks
+    /// it starts for itself (default: nil, which takes it from whoever's using the socket)
+    ///
+    /// A server can choose `.utility`, so the work its connections make gives way to the app
+    /// around it.
+    public var priority: TaskPriority?
     public init() {}
+
+    /// The quality of service of the socket's queues, to match ``priority``
+    var dispatchQoS: DispatchQoS {
+      guard let priority = self.priority else {
+        return .unspecified
+      }
+      switch priority.rawValue {
+      case TaskPriority.high.rawValue...:
+        return .userInitiated
+      case TaskPriority.medium.rawValue...:
+        return .default
+      case TaskPriority.low.rawValue...:
+        return .utility
+      default:
+        return .background
+      }
+    }
   }
 
   // Connection + state
   private let connection: NWConnection
-  private let queue = DispatchQueue(label: "NetSocket.NWConnection")
+  private let queue: DispatchQueue
   private var ready = false
   private var isClosed = false  // Set once by shutdown(); the connection has been cancelled
 
@@ -65,6 +88,7 @@ public actor NetSocket {
   private init(connection: NWConnection, config: Config) {
     self.connection = connection
     self.config = config
+    self.queue = DispatchQueue(label: "NetSocket.NWConnection", qos: config.dispatchQoS)
   }
 
   deinit {
@@ -88,12 +112,7 @@ public actor NetSocket {
   ///   `CancellationError` if the task is cancelled first
   public static func connect(host: NWEndpoint.Host, port: NWEndpoint.Port, config: Config = .init(), parameters: NWParameters = .tcp) async throws -> NetSocket {
     let parameters = parameters.copy()
-    if config.enableKeepAlive {
-      if let tcpOptions = parameters.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options {
-        tcpOptions.enableKeepalive = true
-        tcpOptions.keepaliveIdle = config.keepAliveIdleTime
-      }
-    }
+    self.applyKeepAlive(config, to: parameters)
     let conn = NWConnection(host: host, port: port, using: parameters)
     let socket = NetSocket(connection: conn, config: config)
     do {
@@ -121,6 +140,43 @@ public actor NetSocket {
     }
 
     return try await self.connect(host: NWEndpoint.Host(host), port: nwPort, config: config, parameters: tls.makeParameters())
+  }
+
+  // MARK: Accept
+
+  /// Take a connection that arrived at a ``Listener``, and wait until it's ready
+  ///
+  /// The connection is passed just as `newConnectionHandler` hands it over, before it's started:
+  /// this starts it. Over TLS, it's ready once the handshake is done. Keepalive comes from the
+  /// listener's parameters, which the connection already has, rather than from `config`.
+  ///
+  /// - Throws: ``NetSocketError/failed(underlying:)`` if the connection fails before it's ready, or
+  ///   `CancellationError` if the task is cancelled first. Either way the connection is closed.
+  static func accept(_ connection: NWConnection, config: Config = .init()) async throws -> NetSocket {
+    let socket = NetSocket(connection: connection, config: config)
+    do {
+      try await socket.start()
+    } catch {
+      await socket.close()
+      throw error
+    }
+    return socket
+  }
+
+  /// The other end: the host and port connected to, or for an accepted connection, the address
+  /// and port it came from
+  public nonisolated var remoteEndpoint: NWEndpoint {
+    self.connection.endpoint
+  }
+
+  /// Turn on TCP keepalive in `parameters` if `config` asks for it
+  static func applyKeepAlive(_ config: Config, to parameters: NWParameters) {
+    guard config.enableKeepAlive,
+          let tcpOptions = parameters.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options else {
+      return
+    }
+    tcpOptions.enableKeepalive = true
+    tcpOptions.keepaliveIdle = config.keepAliveIdleTime
   }
 
   // MARK: Close
@@ -406,7 +462,7 @@ public actor NetSocket {
       continuation.yield(state)
     }
 
-    self.stateTask = Task { [weak self] in
+    self.stateTask = Task(priority: self.config.priority) { [weak self] in
       for await state in stream {
         // Bind self per update so this task never keeps the socket alive between updates.
         guard let self else { return }
@@ -423,8 +479,9 @@ public actor NetSocket {
   /// Ask the connection for the next chunk. Only one receive is ever outstanding.
   private func receiveNext() {
     guard !self.isClosed else { return }
+    let priority = self.config.priority
     self.connection.receive(minimumIncompleteLength: 1, maximumLength: self.config.receiveChunk) { [weak self] data, _, isComplete, error in
-      Task {
+      Task(priority: priority) {
         await self?.handleReceive(data: data, isComplete: isComplete, error: error)
       }
     }
@@ -468,7 +525,7 @@ public actor NetSocket {
     case .failed(let error):
       self.shutdown(.failed(underlying: error))
     case .waiting(let error):
-      // Fails a pending connect(), which then closes the socket.
+      // Fails a pending connect() or accept(), which then closes the socket.
       self.resumeReadyWaiters(with: .failure(NetSocketError.failed(underlying: error)))
     case .cancelled:
       self.shutdown(.closed)

@@ -20,4 +20,15 @@ struct TLSPolicyTests {
     #expect(configured.withLock { $0 })
     #expect(parameters.defaultProtocolStack.applicationProtocols.contains { $0 is NWProtocolTLS.Options })
   }
+
+  @available(macOS 15, iOS 18, tvOS 18, visionOS 2, *)
+  @Test func serverWithAUsableIdentity() throws {
+    let configured = OSAllocatedUnfairLock(initialState: false)
+    let policy = try TLSPolicy.server(identity: TestIdentity().identity) { _ in configured.withLock { $0 = true } }
+    let parameters = policy.makeParameters()
+
+    #expect(policy.enabled)
+    #expect(configured.withLock { $0 })
+    #expect(parameters.defaultProtocolStack.applicationProtocols.contains { $0 is NWProtocolTLS.Options })
+  }
 }
