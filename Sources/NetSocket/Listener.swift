@@ -54,7 +54,7 @@ extension NetSocket {
     if let interface {
       parameters.requiredInterfaceType = interface
     }
-    self.applyKeepAlive(config, to: parameters)
+    self.applyTCPOptions(config, to: parameters)
 
     let listener: NWListener
     do {

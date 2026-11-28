@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.0
+
+- Added `send(_:sent:)`, which queues bytes and returns straight away, rather than waiting for the network stack to take them as `write` does. They go in the order they're sent, after anything already written, and `sent` is told once they've gone, or why not. A server sending to many connections at once no longer waits on each one. In Hotline's server with 1,000 people on, a login took 18 ms of CPU instead of about 200, and a chat message 45 µs for each person it reached instead of about 130.
+- `close()` sends what's queued before the connection ends, as it said it waited for unsent data: it ends the stream after it, and cancels once that's gone. Cancelling at once could drop bytes Network hadn't sent yet. `forceClose()` cuts short a `close()` that's still waiting on a peer that's stopped reading.
+- Added `Config.noDelay`, which sends each write at once, rather than holding small ones back to gather them with what comes next, as Nagle's algorithm does.
+- A socket lets go of its receive buffer once everything in it has been read, so a burst doesn't keep its memory for as long as the connection's open.
+- README: covers `send`, `noDelay`, and how `close()` and `forceClose()` work together. It's clear that `close()` returns straight away while what's queued goes in the background, with an example of following up with `forceClose()` after a deadline.
+
 ## 0.2.0
 
 - Added `NetSocket.listen(port:)`, which takes connections on a port. The `NetSocket.Listener` it returns hands each one over as a ready `NetSocket`, in a `for await` loop.

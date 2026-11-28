@@ -50,4 +50,51 @@ struct WriteTests {
       #expect(try await socket.read(payload.count) == payload)
     }
   }
+
+  @Test func sendQueuesInOrderWithWrites() async throws {
+    try await withConnectedSocket { socket, peer in
+      let first = patternData(count: 100_000)
+      socket.send(first)
+      try await socket.write(Data([0x01, 0x02]))
+      socket.send(Data([0x03]))
+      #expect(try await peer.receive(first.count + 3) == first + Data([0x01, 0x02, 0x03]))
+    }
+  }
+
+  @Test func sendSaysWhenItsGoneOrWhyNot() async throws {
+    try await withConnectedSocket { socket, _ in
+      let gone = await withCheckedContinuation { (cont: CheckedContinuation<NetSocketError?, Never>) in
+        socket.send(Data([0x01])) { cont.resume(returning: $0) }
+      }
+      #expect(gone == nil)
+      await socket.close()
+      let refused = await withCheckedContinuation { (cont: CheckedContinuation<NetSocketError?, Never>) in
+        socket.send(Data([0x02])) { cont.resume(returning: $0) }
+      }
+      #expect(refused != nil)
+    }
+  }
+
+  @Test func closeSendsWhatsQueuedFirst() async throws {
+    try await withConnectedSocket { socket, peer throws in
+      let payload = patternData(count: 500_000)
+      socket.send(payload)
+      await socket.close()
+      #expect(try await peer.receive(payload.count) == payload)
+    }
+  }
+
+  @Test func forceCloseCutsShortACloseStillSending() async throws {
+    try await withConnectedSocket { socket, _ in
+      // More than the network holds for a peer that isn't reading, so close() is still sending.
+      let (sent, told) = AsyncStream.makeStream(of: NetSocketError?.self)
+      socket.send(Data(count: 32 * 1024 * 1024)) { told.yield($0) }
+      await socket.close()
+      await socket.forceClose()
+      // What hadn't gone is dropped, rather than waiting on the peer to read it.
+      var results = sent.makeAsyncIterator()
+      let result = await results.next()
+      #expect(result != nil && result! != nil)
+    }
+  }
 }

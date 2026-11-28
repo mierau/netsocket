@@ -39,7 +39,7 @@ Add NetSocket to your `Package.swift`:
 
 ```swift
 dependencies: [
-  .package(url: "https://github.com/mierau/netsocket.git", from: "0.2.0"),
+  .package(url: "https://github.com/mierau/netsocket.git", from: "0.3.0"),
 ],
 targets: [
   .target(name: "MyApp", dependencies: [
@@ -61,10 +61,11 @@ let socket = try await NetSocket.connect(host: "hotline.example.com", port: 5500
 // TLS
 let secure = try await NetSocket.connect(host: "example.com", port: 443, tls: .enabled())
 
-// Keepalive and buffer limits
+// Keepalive, sending small writes at once, and buffer limits
 var config = NetSocket.Config()
 config.enableKeepAlive = true
 config.keepAliveIdleTime = 60
+config.noDelay = true
 let chat = try await NetSocket.connect(host: "hotline.example.com", port: 5500, config: config)
 ```
 
@@ -91,6 +92,17 @@ try await socket.write("Café", encoding: .macOSRoman)
 ```
 
 Each write returns once the network stack has taken the bytes, and reports how many it sent.
+
+To send without waiting, as a server sending to many connections at once does, use `send`. It queues the bytes and returns straight away. They go in order, after anything already written, and `close()` sends what's queued before it closes:
+
+```swift
+socket.send(Data([0x01, 0x02]))                      // Returns at once
+socket.send(message) { error in                      // Told once they've gone, or why not
+  if let error { print("Not sent: \(error)") }
+}
+```
+
+With `Config.noDelay` on, small writes go out at once, rather than being held back to gather them with what comes next, as Nagle's algorithm does.
 
 ### Reading
 
@@ -201,8 +213,18 @@ To send or receive part of a larger stream, such as one fork of a classic Mac fi
 ### Closing and errors
 
 ```swift
-await socket.close()        // Waits for unsent data to go out
-await socket.forceClose()   // Doesn't
+await socket.close()        // Sends what's still queued, then ends the connection
+await socket.forceClose()   // Ends it now, dropping anything unsent
+```
+
+`close()` returns straight away. What's queued goes in the background, and the connection ends once it's gone. If the other end has stopped reading, it never goes, and the connection stays open until `forceClose()`. So a server closing a client should follow up with `forceClose()` after a deadline:
+
+```swift
+await socket.close()
+Task {
+  try? await Task.sleep(for: .seconds(10))
+  await socket.forceClose()   // Does nothing if the connection has already ended
+}
 ```
 
 Closing fails any pending reads and writes with `NetSocketError.closed`. When the peer closes the connection, anything it sent before closing can still be read. Reads after that throw:

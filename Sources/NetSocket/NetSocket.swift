@@ -35,6 +35,12 @@ public actor NetSocket {
     public var enableKeepAlive: Bool = false
     /// Seconds of idle time before the first keepalive probe (default: 60)
     public var keepAliveIdleTime: Int = 60
+    /// Send each write at once, rather than holding a small one back to gather it with what comes
+    /// next, as Nagle's algorithm does, which can wait on the other end's delayed acknowledgment
+    /// (default: false)
+    ///
+    /// A server that sends many small messages, like a chat server, gets them out sooner with this on.
+    public var noDelay: Bool = false
     /// The priority the socket's work runs at, from its connection's events and TLS to the tasks
     /// it starts for itself (default: nil, which takes it from whoever's using the socket)
     ///
@@ -106,13 +112,14 @@ public actor NetSocket {
   /// - Parameters:
   ///   - host: For example `.name("example.com", nil)` or an IP address
   ///   - port: The port to connect to
-  ///   - config: Buffering and keepalive options
-  ///   - parameters: Plain TCP by default. Keepalive settings from `config` are applied to a copy.
+  ///   - config: Buffering, keepalive and no-delay options
+  ///   - parameters: Plain TCP by default. Keepalive and no-delay settings from `config` are
+  ///     applied to a copy.
   /// - Throws: ``NetSocketError/failed(underlying:)`` if the connection is refused or fails, or
   ///   `CancellationError` if the task is cancelled first
   public static func connect(host: NWEndpoint.Host, port: NWEndpoint.Port, config: Config = .init(), parameters: NWParameters = .tcp) async throws -> NetSocket {
     let parameters = parameters.copy()
-    self.applyKeepAlive(config, to: parameters)
+    self.applyTCPOptions(config, to: parameters)
     let conn = NWConnection(host: host, port: port, using: parameters)
     let socket = NetSocket(connection: conn, config: config)
     do {
@@ -147,8 +154,8 @@ public actor NetSocket {
   /// Take a connection that arrived at a ``Listener``, and wait until it's ready
   ///
   /// The connection is passed just as `newConnectionHandler` hands it over, before it's started:
-  /// this starts it. Over TLS, it's ready once the handshake is done. Keepalive comes from the
-  /// listener's parameters, which the connection already has, rather than from `config`.
+  /// this starts it. Over TLS, it's ready once the handshake is done. Keepalive and no-delay come
+  /// from the listener's parameters, which the connection already has, rather than from `config`.
   ///
   /// - Throws: ``NetSocketError/failed(underlying:)`` if the connection fails before it's ready, or
   ///   `CancellationError` if the task is cancelled first. Either way the connection is closed.
@@ -169,30 +176,37 @@ public actor NetSocket {
     self.connection.endpoint
   }
 
-  /// Turn on TCP keepalive in `parameters` if `config` asks for it
-  static func applyKeepAlive(_ config: Config, to parameters: NWParameters) {
-    guard config.enableKeepAlive,
-          let tcpOptions = parameters.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options else {
+  /// Turn on TCP keepalive, and sending each write at once, in `parameters`, as `config` asks
+  static func applyTCPOptions(_ config: Config, to parameters: NWParameters) {
+    guard let tcpOptions = parameters.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options else {
       return
     }
-    tcpOptions.enableKeepalive = true
-    tcpOptions.keepaliveIdle = config.keepAliveIdleTime
+    if config.enableKeepAlive {
+      tcpOptions.enableKeepalive = true
+      tcpOptions.keepaliveIdle = config.keepAliveIdleTime
+    }
+    if config.noDelay {
+      tcpOptions.noDelay = true
+    }
   }
 
   // MARK: Close
 
-  /// Close the connection
+  /// Close the connection, after sending what's still queued
   ///
-  /// Pending reads and writes fail with ``NetSocketError/closed``, and unread data is discarded.
-  /// Calling it again does nothing. See ``forceClose()`` to skip waiting for unsent data.
+  /// It returns straight away. Bytes queued with ``send(_:sent:)`` go in the background, and the
+  /// connection ends once they've gone. If the other end has stopped reading, the connection stays
+  /// open until it reads them, or until ``forceClose()``. Pending reads and writes fail with
+  /// ``NetSocketError/closed``, and unread data is discarded. Calling it again does nothing.
   public func close() {
-    self.shutdown(.closed)
+    self.shutdown(.closed, gracefully: true)
     self.discardBuffer()
   }
 
   /// Close the connection immediately, without waiting for unsent data
   ///
-  /// Otherwise the same as ``close()``.
+  /// It also cuts short a ``close()`` that's still sending what was queued. Otherwise the same as
+  /// ``close()``.
   public func forceClose() {
     self.shutdown(.closed, force: true)
     self.discardBuffer()
@@ -212,6 +226,19 @@ public actor NetSocket {
         else { cont.resume(returning: data.count) }
       })
     }
+  }
+
+  /// Queue bytes to send, without waiting for the network stack to take them
+  ///
+  /// They go in the order they're queued, after anything written before, and nothing waits, so
+  /// sending to many connections at once costs no more than the sends themselves. Use it once the
+  /// socket is ready, as one from `connect` or a ``Listener`` is. `sent` is called on the socket's
+  /// queue once the bytes have been taken, or with why they couldn't be, as when the socket's
+  /// closed. ``close()`` sends what's queued before it closes.
+  public nonisolated func send(_ data: Data, sent: (@Sendable (NetSocketError?) -> Void)? = nil) {
+    self.connection.send(content: data, completion: .contentProcessed { error in
+      sent?(error.map { NetSocketError.failed(underlying: $0) })
+    })
   }
 
   /// Send a fixed-width integer in the given byte order
@@ -537,9 +564,19 @@ public actor NetSocket {
   /// End the connection: cancel it, stop state updates, and fail anything waiting on it
   ///
   /// Every way a connection ends goes through here: close(), the peer closing, a receive error,
-  /// a failed state, or a buffer overflow. Later calls do nothing.
-  private func shutdown(_ error: NetSocketError, force: Bool = false) {
-    guard !self.isClosed else { return }
+  /// a failed state, or a buffer overflow. Later calls do nothing, except to force a graceful
+  /// close that's still sending to end now.
+  ///
+  /// - Parameter gracefully: Whether what's been sent goes first, as for our own close(). The
+  ///   stream ends after it, and the connection's cancelled once that's gone, since cancelling at
+  ///   once drops what Network hasn't sent yet.
+  private func shutdown(_ error: NetSocketError, force: Bool = false, gracefully: Bool = false) {
+    guard !self.isClosed else {
+      if force {
+        self.connection.forceCancel()
+      }
+      return
+    }
     self.isClosed = true
     self.stateContinuation?.finish()
     self.stateContinuation = nil
@@ -547,7 +584,13 @@ public actor NetSocket {
     self.stateTask = nil
     if force {
       self.connection.forceCancel()
+    } else if gracefully, self.ready {
+      let connection = self.connection
+      connection.send(content: nil, contentContext: .finalMessage, isComplete: true, completion: .contentProcessed { _ in
+        connection.cancel()
+      })
     } else {
+      // Not ready, as a refused connect isn't, which Network would otherwise keep retrying.
       self.connection.cancel()
     }
     self.failAllWaiters(error)
@@ -596,6 +639,13 @@ public actor NetSocket {
   }
 
   private func compactIfNeeded() {
+    // Everything's been read: let go of the buffer, so a burst doesn't keep its memory for as long
+    // as the connection's open.
+    if self.head == self.buffer.count {
+      self.buffer = Data()
+      self.head = 0
+      return
+    }
     // Avoid unbounded memory as head advances
     if self.head > 64 * 1024 && self.head > self.buffer.count / 2 {
       self.buffer.removeSubrange(0..<self.head)

@@ -25,6 +25,8 @@ Integers can be read and written in either byte order, strings in any `String.En
 
 The same kinds of reads and writes work on bytes in memory. `Data`, `[UInt8]` and their slices get `append(_:endian:)` and `read(_:at:endian:)` methods, for building a packet before sending it or parsing one already received.
 
+Each write waits until the network stack has taken its bytes. To send without waiting, as a server sending to many connections at once does, ``NetSocket/NetSocket/send(_:sent:)`` queues bytes and returns straight away.
+
 Files go straight between disk and socket in chunks, with a progress stream that includes transfer speed and time remaining.
 
 ### Flow control
@@ -33,7 +35,7 @@ The socket stops receiving once ``NetSocket/NetSocket/Config-swift.struct/receiv
 
 ### Closing
 
-When the peer closes the connection, anything it sent first can still be read. Reads after that throw ``NetSocketError/closed``, or ``NetSocketError/insufficientData(expected:got:)`` if the connection closed partway through a read. Calling ``NetSocket/NetSocket/close()`` fails pending reads and writes and discards unread data.
+When the peer closes the connection, anything it sent first can still be read. Reads after that throw ``NetSocketError/closed``, or ``NetSocketError/insufficientData(expected:got:)`` if the connection closed partway through a read. Calling ``NetSocket/NetSocket/close()`` fails pending reads and writes and discards unread data. Bytes queued with ``NetSocket/NetSocket/send(_:sent:)`` still go before the stream ends, and ``NetSocket/NetSocket/forceClose()`` ends it at once, without them.
 
 Cancelling the task that's waiting on a read throws `CancellationError` and leaves the socket usable.
 
